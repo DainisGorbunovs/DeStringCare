@@ -1,22 +1,24 @@
 import argparse
 import hashlib
 import json
-import xml.etree.ElementTree as ET
-import zipfile
+import logging
 from pathlib import Path
 
 import OpenSSL
-import jks
-from Crypto.Cipher import AES
 from OpenSSL import crypto
+from jks import jks
+from pyaxmlparser import APK
 
-BS = 16
-pad = lambda s: s + (BS - len(s) % BS) * chr(BS - len(s) % BS)
-unpad = lambda s: s[:-ord(s[len(s) - 1:])]
-CODIFICATION = 'UTF-8'
+from .AESCipher import AESCipher
+
+CODIFICATION = 'utf-8'
 
 
-def get_sha1_key(apk_filepath: str) -> str:
+def generate_key(full_sha1_key: str) -> str:
+    return hashlib.sha1(full_sha1_key.encode(CODIFICATION)).digest()[:16].hex()
+
+
+def get_decrypt_keys(apk: APK, certificate_files: list):
     # https://stackoverflow.com/questions/45104923/pyopenssls-pkcs7-object-provide-very-little-information-how-can-i-get-the-sha1
     def get_certificates(self):
         from OpenSSL.crypto import _lib, _ffi, X509
@@ -47,92 +49,90 @@ def get_sha1_key(apk_filepath: str) -> str:
             return None
         return tuple(pycerts)
 
-    archive = zipfile.ZipFile(apk_filepath, 'r')
-    imgdata = archive.read('META-INF/CERT.RSA')
-    pkcs7 = crypto.load_pkcs7_data(crypto.FILETYPE_ASN1, imgdata)
-    certs = get_certificates(pkcs7)
+    sha1hashes = []
+    # assume there are more than one certificate file
+    for certificate_file in certificate_files:
+        certificate_bytes = apk.zip.read(certificate_file)
+        pkcs7 = crypto.load_pkcs7_data(crypto.FILETYPE_ASN1, certificate_bytes)
+        # assume there are more than one certificate
+        certs = get_certificates(pkcs7)
+        hashes = [cert.digest('sha1').decode() for cert in certs]
+        sha1hashes.extend(hashes)
 
-    hashes = [cert.digest('sha1').decode() for cert in certs]
-    return hashes[0] if len(hashes) == 1 else hashes
+    keys = []
+    for hash in sha1hashes:
+        keys.append(generate_key(hash))
 
-
-def generate_key(full_sha1_key: str) -> str:
-    return hashlib.sha1(full_sha1_key.encode(CODIFICATION)).digest()[:16]
-
-
-def encrypt_secret(raw: str, generated_key: str = None) -> str:
-    if generated_key is None:
-        generated_key = generate_key(SHA1_KEY)
-    raw = pad(raw)
-    cipher = AES.new(generated_key, AES.MODE_ECB)
-    return cipher.encrypt(raw).hex().upper()
+    return keys
 
 
-def decrypt_secret(enc: str, generated_key: str = None) -> str:
-    if generated_key is None:
-        generated_key = generate_key(SHA1_KEY)
-    secret_array = bytes.fromhex(enc)
-    cipher = AES.new(generated_key, AES.MODE_ECB)
-    plaintext = unpad(cipher.decrypt(secret_array).decode(CODIFICATION))
-    return plaintext
+def extract_secrets(apk: APK, decrypt_ciphers: list, encrypt_cipher: AESCipher) -> dict:
+    res = apk.get_android_resources()
+    logging.getLogger("pyaxmlparser.stringblock").setLevel(logging.ERROR)
+    res._analyse()
+    logging.getLogger("pyaxmlparser.stringblock").setLevel(logging.NOTSET)
 
+    strings = res.values[apk.get_package()]['\x00\x00']['string']
 
-def load_file(xml_path, encrypt_key: str = None):
-    # use apktool to decode the resources beforehand
     valmap = {}
-    encmap = {}
+    for index, (property, value) in enumerate(strings):
+        for decrypt_cipher in decrypt_ciphers:
+            try:
+                known = decrypt_cipher.decrypt(value)
+                valmap[property] = known
+                if encrypt_cipher is not None:
+                    strings[index][1] = encrypt_cipher.encrypt(known).upper()
+                break
+            except (TypeError, ValueError, IndexError):
+                # ignore values which cannot be decrypted
+                pass
 
-    xml = ET.parse(xml_path)
+    if encrypt_cipher is not None:
+        buff = '<?xml version="1.0" encoding="utf-8"?>\n'
+        buff += '<resources>\n'
 
-    for el in xml.findall('string'):
-        propname = el.attrib['name']
-        val = el.text
+        for key, value in strings:
+            buff += '\t<string name="{}">{}</string>\n'.format(key, value)
 
-        try:
-            known = decrypt_secret(val)
-            valmap[propname] = known
-            if encrypt_key is not None:
-                encmap[propname] = encrypt_secret(known, generate_key(encrypt_key))
-                el.text = encmap[propname]
-        except (TypeError, ValueError):
-            # ignore values which cannot be decrypted
-            pass
+        buff += '</resources>\n'
 
-    if encrypt_key is not None and len(encmap) > 0:
-        xml.write('resigned-strings.xml', encoding='utf-8', xml_declaration=True)
+        xml = buff.encode('utf-8')
+
+        with open('resigned-strings.xml', 'wb') as f:
+            f.write(xml)
 
     return valmap
 
 
-def get_key_from_android_debug_keystore(keystore_path: str, keystore_pass: str = 'android') -> str:
-    ks = jks.KeyStore.load(keystore_path, keystore_pass)
-    cert_bytes = ks.entries['androiddebugkey'].cert_chain[0][1]
-    public_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, cert_bytes)
-    sha1hash = public_cert.digest('sha1').decode()
-    return sha1hash
-
-
 def main():
-    global APK_FILEPATH, SHA1_KEY
-
     parser = argparse.ArgumentParser(description="Extract StringCare secrets from an Android APK.")
     parser.add_argument("-r", "--resign", action="store_true", help="Resign and save xml file")
     parser.add_argument("apk", help="Path to the apk", type=str)
-    parser.add_argument("xml", help="Path to an xml containing StringCare secrets", type=str)
     args = parser.parse_args()
 
-    APK_FILEPATH = str(Path.cwd().joinpath(args.apk))
-    SHA1_KEY = get_sha1_key(APK_FILEPATH)
+    logging.getLogger("pyaxmlparser.core").setLevel(logging.ERROR)
+    apk = APK(args.apk)
+    logging.getLogger("pyaxmlparser.core").setLevel(logging.NOTSET)
+    certificate_files = [f for f in apk.files if f.startswith('META-INF/') and f.endswith('.RSA')]
 
-    # resign the file with our own key
+    decrypt_keys = get_decrypt_keys(apk, certificate_files)
+    decrypt_ciphers = [AESCipher(key) for key in decrypt_keys]
+
+    encrypt_cipher = None
     if args.resign:
+        def get_key_from_android_debug_keystore(keystore_path: str, keystore_pass: str = 'android') -> str:
+            ks = jks.KeyStore.load(keystore_path, keystore_pass)
+            cert_bytes = ks.entries['androiddebugkey'].cert_chain[0][1]
+            public_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_ASN1, cert_bytes)
+            sha1hash = public_cert.digest('sha1').decode()
+            return sha1hash
+
         keystore_path = str(Path.home().joinpath('.android', 'debug.keystore'))
         sha1hash = get_key_from_android_debug_keystore(keystore_path)
-        valmap = load_file(str(Path.cwd().joinpath(args.xml)), sha1hash)
-    else:
-        valmap = load_file(str(Path.cwd().joinpath(args.xml)))
+        encrypt_key = generate_key(sha1hash)
+        encrypt_cipher = AESCipher(encrypt_key)
 
-    # print the secrets
+    valmap = extract_secrets(apk, decrypt_ciphers, encrypt_cipher)
     print(json.dumps(valmap, indent=4, sort_keys=True))
 
 
