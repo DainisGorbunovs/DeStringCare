@@ -9,7 +9,7 @@ from OpenSSL import crypto
 from jks import jks
 from pyaxmlparser import APK
 
-from .AESCipher import AESCipher
+from DeStringCare import AESCipher
 
 CODIFICATION = 'utf-8'
 
@@ -91,8 +91,22 @@ def extract_secrets(apk: APK, decrypt_ciphers: list, encrypt_cipher: AESCipher) 
         buff = '<?xml version="1.0" encoding="utf-8"?>\n'
         buff += '<resources>\n'
 
+        char_map = {
+            '<': '&lt;',
+            '@': '\@'
+        }
         for key, value in strings:
-            buff += '\t<string name="{}">{}</string>\n'.format(key, value)
+            value = value.replace('&', '&amp;')
+            for old_symbol, new_symbol in char_map.items():
+                value = value.replace(old_symbol, new_symbol)
+
+            if '\n' in value or '\'' in value:
+                value = '"{}"'.format(value)
+
+            if value == '':
+                buff += '    <string name="{}"/>\n'.format(key)
+            else:
+                buff += '    <string name="{}">{}</string>\n'.format(key, value)
 
         buff += '</resources>\n'
 
