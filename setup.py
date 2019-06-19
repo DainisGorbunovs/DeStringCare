@@ -5,7 +5,7 @@ with open('README.md', 'r') as fh:
 
 setuptools.setup(
     name='DeStringCare',
-    version='0.0.3',
+    version='0.0.4',
     author='Dainis Gorbunovs',
     author_email='dgdev@protonmail.com',
     description='DeStringCare for extracting Android apk secrets',
@@ -13,10 +13,11 @@ setuptools.setup(
     long_description_content_type='text/markdown',
     url='https://github.com/DainisGorbunovs/DeStringCare',
     packages=setuptools.find_packages(),
+    include_package_data=True,
     keywords=['StringCare', 'destringcare', 'decrypt', 'apk', 'secrets'],
     install_requires=[
         'cryptography',
-        'pycrypto',
+        'pycryptodomex',
         'pyOpenSSL',
         'pyjks',
         'pyaxmlparser'

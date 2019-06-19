@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 
 import OpenSSL
@@ -66,7 +67,15 @@ def get_decrypt_keys(apk: APK, certificate_files: list):
     return keys
 
 
-def extract_secrets(apk: APK, decrypt_ciphers: list, encrypt_cipher: AESCipher) -> dict:
+def extract_secrets(apk: APK, decrypt_ciphers: list, encrypt_cipher: AESCipher,
+                    replaced_values: dict, other_secrets: bool = False) -> dict:
+    secret_keys = set()
+
+    if other_secrets:
+        with open(Path(os.path.dirname(__file__)).joinpath('other_secrets.txt'), 'r') as f:
+            for line in f:
+                secret_keys.add(line.strip())
+
     res = apk.get_android_resources()
     logging.getLogger("pyaxmlparser.stringblock").setLevel(logging.ERROR)
     res._analyse()
@@ -75,17 +84,22 @@ def extract_secrets(apk: APK, decrypt_ciphers: list, encrypt_cipher: AESCipher) 
     strings = res.values[apk.get_package()]['\x00\x00']['string']
 
     valmap = {}
-    for index, (property, value) in enumerate(strings):
+    for index, (property_name, value) in enumerate(strings):
         for decrypt_cipher in decrypt_ciphers:
             try:
                 known = decrypt_cipher.decrypt(value)
-                valmap[property] = known
+                valmap[property_name] = known
+
+                if property_name in replaced_values:
+                    known = replaced_values[property_name]
                 if encrypt_cipher is not None:
                     strings[index][1] = encrypt_cipher.encrypt(known).upper()
                 break
             except (TypeError, ValueError, IndexError):
-                # ignore values which cannot be decrypted
-                pass
+                # add the secret keys to the value map
+                if property_name in secret_keys:
+                    valmap[property_name] = value
+                # ignore other values which cannot be decrypted
 
     if encrypt_cipher is not None:
         buff = '<?xml version="1.0" encoding="utf-8"?>\n'
@@ -121,7 +135,9 @@ def extract_secrets(apk: APK, decrypt_ciphers: list, encrypt_cipher: AESCipher) 
 def main():
     parser = argparse.ArgumentParser(description="Extract StringCare secrets from an Android APK.")
     parser.add_argument("-r", "--resign", action="store_true", help="Resign and save xml file")
+    parser.add_argument("-o", "--other", action="store_true", help="Include a list of other secrets")
     parser.add_argument("apk", help="Path to the apk", type=str)
+    parser.add_argument("replaced", help="Path to the replaced values", type=str, nargs='?')
     args = parser.parse_args()
 
     logging.getLogger("pyaxmlparser.core").setLevel(logging.ERROR)
@@ -146,7 +162,12 @@ def main():
         encrypt_key = generate_key(sha1hash)
         encrypt_cipher = AESCipher(encrypt_key)
 
-    valmap = extract_secrets(apk, decrypt_ciphers, encrypt_cipher)
+    replaced_map = {}
+    if args.replaced is not None:
+        with open(args.replaced, 'rb') as f:
+            replaced_map = json.load(f)
+
+    valmap = extract_secrets(apk, decrypt_ciphers, encrypt_cipher, replaced_map, args.other)
     print(json.dumps(valmap, indent=4, sort_keys=True))
 
 

@@ -1,5 +1,5 @@
 cryptography==2.6.1
-pycrypto==2.6.1
+pycryptodomex==3.8.2
 pyOpenSSL==19.0.0
 pyjks==19.0.0
 pyaxmlparser==0.3.15

@@ -1,5 +1,5 @@
 # https://gist.github.com/DainisGorbunovs/c190aecba33c431f0c5d194a1aeace9c
-from Crypto.Cipher import AES
+from Cryptodome.Cipher import AES
 
 BS = 16
 pad = lambda s: s + (BS - len(s) % BS) * chr(BS - len(s) % BS)
