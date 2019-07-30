@@ -21,7 +21,7 @@ class AESCipher:
         raw = pad(raw)
         cipher = AES.new(self.key, AES.MODE_ECB)
         # return cipher.encrypt(raw).encode("hex")  # Python 2
-        return cipher.encrypt(raw).hex()
+        return cipher.encrypt(raw.encode()).hex()
 
     def decrypt(self, enc):
         """
