@@ -1,4 +1,4 @@
-cryptography==2.6.1
+cryptography==3.2
 pycryptodomex==3.8.2
 pyOpenSSL==19.0.0
 pyjks==19.0.0
